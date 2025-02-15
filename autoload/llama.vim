@@ -50,6 +50,9 @@ let s:default_config = {
     \ 'ring_chunk_size':  64,
     \ 'ring_scope':       1024,
     \ 'ring_update_ms':   1000,
+    \ 'edit_history_size': 10,        " Number of recent edits to track
+    \ 'edit_context_lines': 5,        " Lines of context around each edit
+    \ 'edit_debounce_ms':  250,       " Debounce time for edit tracking
     \ }
 
 let llama_config = get(g:, 'llama_config', s:default_config)
@@ -111,6 +114,11 @@ function! llama#init()
 
     let s:line_cur = ''
 
+    " Edit history tracking
+    let s:edit_history = []        " List of recent edits
+    let s:last_edit_time = 0       " Last edit timestamp
+    let s:last_edit_pos = [0, 0]   " Last edit position [line, col]
+
     let s:line_cur_prefix = ''
     let s:line_cur_suffix = ''
 
@@ -171,6 +179,10 @@ function! llama#init()
 
         " gather chunk upon saving the file
         autocmd BufWritePost    * call s:pick_chunk(getline(max([1, line('.') - g:llama_config.ring_chunk_size/2]), min([line('.') + g:llama_config.ring_chunk_size/2, line('$')])), v:true, v:true)
+
+        " Track edits
+        autocmd TextChanged,TextChangedI * call s:track_edit()
+        autocmd InsertLeave * call s:track_edit()
     augroup END
 
     silent! call llama#fim_cancel()
@@ -890,6 +902,49 @@ function! s:fim_on_stdout(hash, cache, pos_x, pos_y, is_auto, job_id, data, even
     inoremap <buffer> <C-B>   <C-O>:call llama#fim_accept('word')<CR>
 
     let s:hint_shown = v:true
+endfunction
+
+function! s:get_edit_context()
+    let l:context = []
+    for l:edit in s:edit_history
+        call extend(l:context, [{
+            \ 'text': join(l:edit.lines, "\n"),
+            \ 'time': reltime([l:edit.time]),
+            \ 'filename': expand('%:p')
+            \ }])
+    endfor
+    return l:context
+endfunction
+
+function! s:track_edit()
+    let l:cur_time = reltimefloat(reltime())
+    
+    " Debounce edits
+    if l:cur_time - s:last_edit_time < g:llama_config.edit_debounce_ms / 1000.0
+        return
+    endif
+
+    let l:cur_pos = [line('.'), col('.')]
+    let l:edit_start = max([1, line('.') - g:llama_config.edit_context_lines])
+    let l:edit_end = min([line('$'), line('.') + g:llama_config.edit_context_lines])
+    
+    let l:edit = {
+        \ 'lines': getline(l:edit_start, l:edit_end),
+        \ 'pos': l:cur_pos,
+        \ 'time': l:cur_time,
+        \ 'context_start': l:edit_start,
+        \ 'context_end': l:edit_end
+        \ }
+    
+    call insert(s:edit_history, l:edit)
+    
+    " Trim history to configured size
+    if len(s:edit_history) > g:llama_config.edit_history_size
+        call remove(s:edit_history, g:llama_config.edit_history_size, -1)
+    endif
+    
+    let s:last_edit_time = l:cur_time
+    let s:last_edit_pos = l:cur_pos
 endfunction
 
 function! s:fim_on_exit(job_id, exit_code, event = v:null)
